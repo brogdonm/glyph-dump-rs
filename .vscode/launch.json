@@ -10,7 +10,8 @@
       "request": "launch",
       "program": "${workspaceRoot}/target/debug/glyph-dump.exe",
       "args": [
-        "--font-file=C:\\temp\\FRABK.TTF"
+        "--font-file=C:\\temp\\FRABK.TTF",
+        "--scale-factor=512.0"
       ],
       "cwd": "${workspaceFolder}",
       "env": {

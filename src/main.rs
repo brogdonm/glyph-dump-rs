@@ -2,7 +2,8 @@ use auto_args::AutoArgs;
 use image::{DynamicImage, Rgba};
 use log::{debug, warn};
 use rustc_serialize::{self, hex::ToHex};
-use rusttype::{point, Font, Rect, Scale};
+use rusttype::{point, Font, Rect, Scale, Point};
+use std::arch::x86_64::_SIDD_LEAST_SIGNIFICANT;
 use std::error::Error;
 use std::fs;
 use unicode_categories::UnicodeCategories;
@@ -100,6 +101,23 @@ impl GlyphDimensions for Rect<i32> {
         }
     }
 }
+impl GlyphDimensions for Rect<f32> {
+    fn get_glyph_height(&self) -> u32 {
+        {
+            let min_y = self.min.y;
+            let max_y = self.max.y;
+            (min_y - max_y).ceil().abs() as u32
+        }
+    }
+
+    fn get_glyph_width(&self) -> u32 {
+        {
+            let min_x = self.min.x;
+            let max_x = self.max.x;
+            (max_x - min_x).ceil() as u32
+        }
+    }
+}
 
 /// Gets the base name of the specified file path.
 fn get_base_name(file_path: &str) -> Result<String, Box<dyn Error>> {
@@ -142,7 +160,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let color_arg = arguments.color.unwrap();
     let output_color = (color_arg.red, color_arg.green, color_arg.blue);
     // Scale by a uniform factor
-    let scale = Scale::uniform(arguments.scale_factor.unwrap());
+    //let scale = Scale::uniform(arguments.scale_factor.unwrap());
+    let scale_factor = arguments.scale_factor.unwrap();
 
     for unicode in valid_unicode_ranges {
         // Get the glyph associated with the unicode
@@ -152,6 +171,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
             continue;
         }
         // Scale it and position at {0, 0}
+
+        let one_to_one_scaling = font.glyph(unicode).scaled(Scale::uniform(1.0)).exact_bounding_box().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, ""))?;
+        let new_scale: Rect<f32> = Rect::<f32> {
+            min: Point::<f32> { x: (one_to_one_scaling.min.x * scale_factor) + scale_factor, y: (one_to_one_scaling.min.y * scale_factor) + scale_factor },
+            max: Point::<f32> { x: (one_to_one_scaling.max.x * scale_factor) + scale_factor, y: (one_to_one_scaling.max.y * scale_factor) + scale_factor }
+        };
+        let new_sca_h: f32 = one_to_one_scaling.max.y - one_to_one_scaling.min.y;
+        let new_sca_w: f32 = one_to_one_scaling.max.x - one_to_one_scaling.min.x;
+        let set_vals: Vec<f32> = vec![new_sca_w, new_sca_h];
+        let max_val = set_vals.iter().max_by(|x,y| x.abs().partial_cmp(&y.abs()).unwrap()).unwrap().abs();
+        //let s_factor = (((*max_val - 1.0) * ( scale_factor / *max_val)) + 1.0).abs();
+        let s_factor = scale_factor / max_val;
+        let scale = Scale::uniform(s_factor);
+        debug!("new scaled WxH: {}x{}", new_sca_w, new_sca_h);
+        let non_scaled_height = one_to_one_scaling.get_glyph_height();
+        let non_scaled_width = one_to_one_scaling.get_glyph_width();
+        debug!("Non scaled WxH: {}x{}", non_scaled_width, non_scaled_height);
+        //one_to_one_scaling.get
         let positioned_glyph = glyph.scaled(scale).positioned(point(0.0, 0.0));
         debug!("Dealing with unicode: {:?}", unicode);
 
