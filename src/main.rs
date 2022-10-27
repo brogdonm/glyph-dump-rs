@@ -1,11 +1,11 @@
 use auto_args::AutoArgs;
 use image::{DynamicImage, Rgba};
-use log::debug;
-use owned_ttf_parser::{AsFaceRef, OwnedFace};
+use log::{debug, warn};
 use rustc_serialize::{self, hex::ToHex};
-use rusttype::{point, Font, Scale};
-use unicode_categories::UnicodeCategories;
+use rusttype::{point, Font, Rect, Scale};
+use std::error::Error;
 use std::fs;
+use unicode_categories::UnicodeCategories;
 
 /// Representation of a color
 #[derive(Debug, AutoArgs)]
@@ -15,12 +15,16 @@ struct Color {
     /// Green component
     pub green: u8,
     /// Blue component
-    pub blue: u8
+    pub blue: u8,
 }
 
 impl Default for Color {
     fn default() -> Self {
-        Self { red: 255, green: 255, blue: 255 }
+        Self {
+            red: 255,
+            green: 255,
+            blue: 255,
+        }
     }
 }
 
@@ -29,11 +33,12 @@ impl Default for Color {
 struct CliArgs {
     /// Path to the font file to render
     pub font_file: String,
-    /// Optional output directory for images, defaults to current working
-    /// directory.
+    /// Optional output directory for images (defaults to ./out)
     pub output_dir: Option<String>,
-    /// Optional color used for output.
-    pub color: Option<Color>
+    /// Optional color used for output (defaults to [255, 255, 255])
+    pub color: Option<Color>,
+    /// Factor to scale output uniformly (defaults to 32.0)
+    pub scale_factor: Option<f32>
 }
 
 impl Default for CliArgs {
@@ -41,35 +46,88 @@ impl Default for CliArgs {
         Self {
             font_file: Default::default(),
             output_dir: Some("out".to_owned()),
-            color: Some(Color::default())
+            color: Some(Color::default()),
+            scale_factor: Some(32.0)
         }
     }
 }
 
-fn get_cli_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
+/// Gets the command line arguments
+fn get_cli_args() -> Result<CliArgs, Box<dyn Error>> {
     let mut args = CliArgs::from_args();
+    // We will need to fill out defaults for what was not supplied
     let default_args: CliArgs = CliArgs::default();
+    // Check if we have an output directory
     if args.output_dir.is_none() {
         debug!("Output directory was not specified, using default.");
         args.output_dir = default_args.output_dir;
     }
+    // Check if we need to provide a color
     if args.color.is_none() {
         args.color = default_args.color;
+    }
+    if args.scale_factor.is_none() {
+        args.scale_factor = default_args.scale_factor;
     }
     Ok(args)
 }
 
+/// Calculates the height and width of a glyph.
+trait GlyphDimensions {
+    /// Calculates the height of the glyph
+    fn get_glyph_height(&self) -> u32;
+
+    /// Calculates the width of the glyph
+    fn get_glyph_width(&self) -> u32;
+}
+
+/// Implementation for the GlyphDimensions using the `Rect<i32>` from
+/// `rusttype` mod.
+impl GlyphDimensions for Rect<i32> {
+    fn get_glyph_height(&self) -> u32 {
+        {
+            let min_y = self.min.y;
+            let max_y = self.max.y;
+            (min_y - max_y).unsigned_abs() as u32
+        }
+    }
+
+    fn get_glyph_width(&self) -> u32 {
+        {
+            let min_x = self.min.x;
+            let max_x = self.max.x;
+            (max_x - min_x) as u32
+        }
+    }
+}
+
+/// Gets the base name of the specified file path.
+fn get_base_name(file_path: &str) -> Result<String, Box<dyn Error>> {
+    // Grab the base name of the font file
+    let base_name = std::path::Path::new(file_path)
+        .file_name()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to get base name of file_path: {}", file_path),
+            )
+        })?
+        .to_str()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to convert base name of file_path to &str",
+            )
+        })?;
+    Ok(base_name.to_owned())
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
     let arguments = get_cli_args()?;
     debug!("Command line arguments: {:#?}", &arguments);
 
-    let font_data = std::fs::read(&arguments.font_file)?;
-    let font_face = OwnedFace::from_vec(font_data, 0).unwrap();
-    // TODO: Use the font_face to get number of glyphs to draw
-    font_face.as_face_ref().tables().maxp.number_of_glyphs.get();
-    //font_face.as_face_ref()
     let font_data = std::fs::read(&arguments.font_file)?;
     let font = Font::try_from_vec(font_data).unwrap_or_else(|| {
         panic!(
@@ -77,42 +135,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &arguments.font_file
         );
     });
-    let valid_unicode_ranges =
-        ('\u{0000}'..'\u{10FFFF}').filter(|c| c.is_alphabetic() || c.is_alphanumeric() || c.is_letter_other());
+    // Filter down the range to valid codes for printing
+    let valid_unicode_ranges = ('\u{0000}'..'\u{10FFFF}')
+        .filter(|c| c.is_alphabetic() || c.is_alphanumeric() || c.is_letter_other());
     // Use a black color as output
     let color_arg = arguments.color.unwrap();
     let output_color = (color_arg.red, color_arg.green, color_arg.blue);
     // Scale by a uniform factor
-    let scale = Scale::uniform(512.0);
-    // Grab the vertical metrics for the font at the specified scale
-    let v_metrics = font.v_metrics(scale);
+    let scale = Scale::uniform(arguments.scale_factor.unwrap());
 
     for unicode in valid_unicode_ranges {
+        // Get the glyph associated with the unicode
         let glyph = font.glyph(unicode);
         // Check to see if we have something other than .notdef
         if glyph.id().0 == 0 {
             continue;
         }
-        let positioned_glyph = glyph
-            .scaled(scale)
-            .positioned(point(0.0, 0.0));
+        // Scale it and position at {0, 0}
+        let positioned_glyph = glyph.scaled(scale).positioned(point(0.0, 0.0));
         debug!("Dealing with unicode: {:?}", unicode);
-        debug!("\tv_metrics: {:#?}", &v_metrics);
 
+        // If we have a pixel bounding box for the glyph, we can draw it into
+        // an image
         if let Some(bounding_box) = positioned_glyph.pixel_bounding_box() {
             debug!("\tBounding box: {:#?}", &bounding_box);
-            let glyph_height = {
-                let min_y = bounding_box.min.y;
-                let max_y = bounding_box.max.y;
-                (min_y - max_y).unsigned_abs() as u32
-            };
-            let glyph_width = {
-                let min_x = bounding_box.min.x;
-                let max_x = bounding_box.max.x;
-                (max_x - min_x) as u32
-            };
+            // Grab the height and width of the glyph
+            let glyph_height = bounding_box.get_glyph_height();
+            let glyph_width = bounding_box.get_glyph_width();
             debug!("Glyph WxH: {}x{}", &glyph_width, &glyph_height);
+
+            // Create a new 8-bit RGBA image
             let mut image = DynamicImage::new_rgba8(glyph_width, glyph_height).to_rgba8();
+            // Draw the single pixel into the image
             positioned_glyph.draw(|x, y, v| {
                 image.put_pixel(
                     x as u32,
@@ -125,29 +179,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ]),
                 );
             });
+
+            // If we have an output directory, which we should since we
+            // are setting up the arguments, but still need to check
             if let Some(output_dir) = arguments.output_dir.as_ref() {
-                let base_name = std::path::Path::new(&arguments.font_file)
-                    .file_name()
-                    .unwrap_or_else(|| {
-                        panic!("Error getting file name");
-                    })
-                    .to_str()
-                    .unwrap_or_else(|| {
-                        panic!("Error converting to string.");
-                    });
+                // Grab the base name of the font file
+                let base_name = get_base_name(&arguments.font_file)?;
+                // And build up the final output directory using the base
+                // name.
                 let output_dir = &format!("{}/{}", output_dir, base_name);
-                fs::create_dir_all(output_dir).or_else(|e| {
-                    debug!(
-                        "Could not create directory, most likely already exists: {:?}",
-                        e
-                    );
-                    Ok::<(), Box<dyn std::error::Error>>(())
-                })?;
+                // Create the directory tree
+                fs::create_dir_all(output_dir)?;
+                // Create a prefix for the unicode in a hex string
                 let hex_name = unicode.to_string().as_bytes().to_hex();
+                // And save the image in our output directory
                 image.save(format!("{}/{}_image.png", &output_dir, &hex_name))?;
             } else {
                 panic!("Output directory is not specified!");
             }
+        }
+        // Otherwise what has happened? Why couldn't we get the pixel bounding
+        // box?
+        else {
+            warn!("Failed to get pixel bounding box for unicode: {}", &unicode);
         }
     }
     Ok(())
