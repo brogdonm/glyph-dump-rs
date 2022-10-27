@@ -4,7 +4,25 @@ use log::debug;
 use owned_ttf_parser::{AsFaceRef, OwnedFace};
 use rustc_serialize::{self, hex::ToHex};
 use rusttype::{point, Font, Scale};
+use unicode_categories::UnicodeCategories;
 use std::fs;
+
+/// Representation of a color
+#[derive(Debug, AutoArgs)]
+struct Color {
+    /// Red component
+    pub red: u8,
+    /// Green component
+    pub green: u8,
+    /// Blue component
+    pub blue: u8
+}
+
+impl Default for Color {
+    fn default() -> Self {
+        Self { red: 255, green: 255, blue: 255 }
+    }
+}
 
 /// Structure for the command line arguments.
 #[derive(Debug, AutoArgs)]
@@ -14,6 +32,8 @@ struct CliArgs {
     /// Optional output directory for images, defaults to current working
     /// directory.
     pub output_dir: Option<String>,
+    /// Optional color used for output.
+    pub color: Option<Color>
 }
 
 impl Default for CliArgs {
@@ -21,16 +41,20 @@ impl Default for CliArgs {
         Self {
             font_file: Default::default(),
             output_dir: Some("out".to_owned()),
+            color: Some(Color::default())
         }
     }
 }
 
 fn get_cli_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut args = CliArgs::from_args();
+    let default_args: CliArgs = CliArgs::default();
     if args.output_dir.is_none() {
         debug!("Output directory was not specified, using default.");
-        let default_args: CliArgs = CliArgs::default();
         args.output_dir = default_args.output_dir;
+    }
+    if args.color.is_none() {
+        args.color = default_args.color;
     }
     Ok(args)
 }
@@ -54,9 +78,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     });
     let valid_unicode_ranges =
-        ('\u{0000}'..'\u{10FFFF}').filter(|c| c.is_alphabetic() || c.is_alphanumeric());
+        ('\u{0000}'..'\u{10FFFF}').filter(|c| c.is_alphabetic() || c.is_alphanumeric() || c.is_letter_other());
     // Use a black color as output
-    let output_color = (255, 255, 255);
+    let color_arg = arguments.color.unwrap();
+    let output_color = (color_arg.red, color_arg.green, color_arg.blue);
     // Scale by a uniform factor
     let scale = Scale::uniform(512.0);
     // Grab the vertical metrics for the font at the specified scale
@@ -64,8 +89,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for unicode in valid_unicode_ranges {
         let glyph = font.glyph(unicode);
-        let id = glyph.id().0;
-        if id == 0x20DE || id == 0 {
+        // Check to see if we have something other than .notdef
+        if glyph.id().0 == 0 {
             continue;
         }
         let positioned_glyph = glyph
