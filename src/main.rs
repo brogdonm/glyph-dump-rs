@@ -37,7 +37,7 @@ struct CliArgs {
     pub output_dir: Option<String>,
     /// Optional color used for output (defaults to [255, 255, 255])
     pub color: Option<Color>,
-    /// Factor to scale output uniformly (defaults to 32.0)
+    /// Factor to scale output uniformly (defaults to 128.0)
     pub scale_factor: Option<f32>
 }
 
@@ -47,7 +47,7 @@ impl Default for CliArgs {
             font_file: Default::default(),
             output_dir: Some("out".to_owned()),
             color: Some(Color::default()),
-            scale_factor: Some(32.0)
+            scale_factor: Some(128.0)
         }
     }
 }
