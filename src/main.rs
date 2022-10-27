@@ -137,7 +137,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
     // Filter down the range to valid codes for printing
     let valid_unicode_ranges = ('\u{0000}'..'\u{10FFFF}')
-        .filter(|c| c.is_alphabetic() || c.is_alphanumeric() || c.is_letter_other());
+        .filter(|c| c.is_alphabetic() || c.is_alphanumeric() || c.is_letter_other() || c.is_symbol_other() || c.is_punctuation() || c.is_letter_modifier() || c.is_symbol_modifier() || c.is_symbol());
     // Use a black color as output
     let color_arg = arguments.color.unwrap();
     let output_color = (color_arg.red, color_arg.green, color_arg.blue);
