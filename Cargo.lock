@@ -275,6 +275,7 @@ dependencies = [
  "hex-string",
  "image",
  "log",
+ "rayon",
  "rustc-serialize",
  "rusttype",
  "tokio",
