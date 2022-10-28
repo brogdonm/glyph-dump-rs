@@ -285,7 +285,7 @@ async fn main() -> Result<(), AppError> {
         .iter()
         .map(|unicode| {
             let safe = sync::Arc::clone(&font);
-            create_glyph_img(&safe, *unicode, img_size, &output_color, base_dir_path)
+            create_glyph_img(&safe, *unicode, img_size, &output_color, base_dir.as_path())
         }).filter_map(|x| x.ok())
         .collect();
     for image_path in image_paths {
