@@ -10,10 +10,10 @@ Basic usage:
 cargo run -- --font-file test.otf
 ```
 
-Using a different scaling factor:
+Using a different image size:
 
 ```cmd
-cargo run -- --font-file test.otf --scale-factor 512.0
+cargo run -- --font-file test.otf --img-size 512
 ```
 
 Changing the output color (in this case green):
