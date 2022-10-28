@@ -1,11 +1,12 @@
 use auto_args::AutoArgs;
 use image::{DynamicImage, Rgba};
-use log::{debug, warn};
+use log::debug;
 use rustc_serialize::{self, hex::ToHex};
-use rusttype::{point, Font, Rect, Scale};
-use std::error::Error;
+use rusttype::{point, Font, Glyph, Rect, Scale};
 use std::fs;
 use unicode_categories::UnicodeCategories;
+mod error;
+use crate::error::AppError;
 
 /// Representation of a color
 #[derive(Debug, AutoArgs)]
@@ -18,16 +19,6 @@ struct Color {
     pub blue: u8,
 }
 
-impl Default for Color {
-    fn default() -> Self {
-        Self {
-            red: 255,
-            green: 255,
-            blue: 255,
-        }
-    }
-}
-
 /// Structure for the command line arguments.
 #[derive(Debug, AutoArgs)]
 struct CliArgs {
@@ -37,8 +28,8 @@ struct CliArgs {
     pub output_dir: Option<String>,
     /// Optional color used for output (defaults to [255, 255, 255])
     pub color: Option<Color>,
-    /// Factor to scale output uniformly (defaults to 128.0)
-    pub scale_factor: Option<f32>
+    /// Size to make the image for each glyph (defaults to 128)
+    pub img_size: Option<u32>,
 }
 
 impl Default for CliArgs {
@@ -46,14 +37,18 @@ impl Default for CliArgs {
         Self {
             font_file: Default::default(),
             output_dir: Some("out".to_owned()),
-            color: Some(Color::default()),
-            scale_factor: Some(128.0)
+            color: Some(Color {
+                red: 255,
+                green: 255,
+                blue: 255,
+            }),
+            img_size: Some(128),
         }
     }
 }
 
 /// Gets the command line arguments
-fn get_cli_args() -> Result<CliArgs, Box<dyn Error>> {
+fn get_cli_args() -> Result<CliArgs, AppError> {
     let mut args = CliArgs::from_args();
     // We will need to fill out defaults for what was not supplied
     let default_args: CliArgs = CliArgs::default();
@@ -66,8 +61,8 @@ fn get_cli_args() -> Result<CliArgs, Box<dyn Error>> {
     if args.color.is_none() {
         args.color = default_args.color;
     }
-    if args.scale_factor.is_none() {
-        args.scale_factor = default_args.scale_factor;
+    if args.img_size.is_none() {
+        args.img_size = default_args.img_size;
     }
     Ok(args)
 }
@@ -102,55 +97,87 @@ impl GlyphDimensions for Rect<i32> {
 }
 
 /// Gets the base name of the specified file path.
-fn get_base_name(file_path: &str) -> Result<String, Box<dyn Error>> {
+fn get_base_name(file_path: &str) -> Result<String, AppError> {
     // Grab the base name of the font file
     let base_name = std::path::Path::new(file_path)
         .file_name()
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to get base name of file_path: {}", file_path),
-            )
+            AppError::FormattedMessage(format!(
+                "Failed to get file name for file path: {}",
+                file_path
+            ))
         })?
         .to_str()
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to convert base name of file_path to &str",
-            )
-        })?;
+        .ok_or(AppError::General("Failed to convert base name to str"))?;
     Ok(base_name.to_owned())
 }
 
+fn get_scale(glyph: Glyph, img_size: &u32) -> Result<Scale, AppError> {
+    // We can get at the x/y min/max of the glyph directly, so we use a little
+    // trick of scaling by 1.0 to get the exact bounding box to get the
+    // dimensions.
+    let one_to_one_scaling = glyph
+        .scaled(Scale::uniform(1.0))
+        .exact_bounding_box()
+        .ok_or(AppError::General(
+            "Failed to get exact bounding box for glyph",
+        ))?;
+    // Calculate the height and width of the glyph
+    let height: f32 = one_to_one_scaling.max.y - one_to_one_scaling.min.y;
+    let width: f32 = one_to_one_scaling.max.x - one_to_one_scaling.min.x;
+    // Create a vector so we can find the max
+    let dimensions: Vec<f32> = vec![height, width];
+    // Iterate through the values and find the largest one
+    let max_dimension = dimensions
+        .iter()
+        .max_by(|x, y| x.abs().partial_cmp(&y.abs()).unwrap())
+        .unwrap()
+        .abs();
+    // Find the scaling factor
+    let scale_factor = ((*img_size as f32) / max_dimension).floor();
+    // And create a uniform scale from it
+    Ok(Scale::uniform(scale_factor))
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), AppError> {
     env_logger::init();
     let arguments = get_cli_args()?;
     debug!("Command line arguments: {:#?}", &arguments);
 
     let font_data = std::fs::read(&arguments.font_file)?;
-    let font = Font::try_from_vec(font_data).unwrap_or_else(|| {
-        panic!(
-            "Error constructing font from file: {:?}",
+    let font = Font::try_from_vec(font_data).ok_or_else(|| {
+        AppError::FormattedMessage(format!(
+            "Failed to parse data from file: {}",
             &arguments.font_file
-        );
-    });
+        ))
+    })?;
     // Filter down the range to valid codes for printing
-    let valid_unicode_ranges = ('\u{0000}'..'\u{10FFFF}')
-        .filter(|c| c.is_alphabetic() || c.is_alphanumeric() || c.is_letter_other() || c.is_symbol_other() || c.is_punctuation() || c.is_letter_modifier() || c.is_symbol_modifier() || c.is_symbol());
+    let valid_unicode_ranges = ('\u{0000}'..'\u{10FFFF}').filter(|c| {
+        c.is_alphabetic()
+            || c.is_alphanumeric()
+            || c.is_letter_other()
+            || c.is_symbol_other()
+            || c.is_punctuation()
+            || c.is_letter_modifier()
+            || c.is_symbol_modifier()
+            || c.is_symbol()
+        /* Should others be included?? */
+    });
     // Use a black color as output
     let color_arg = arguments.color.unwrap();
     let output_color = (color_arg.red, color_arg.green, color_arg.blue);
-    // Scale by a uniform factor
-    let scale = Scale::uniform(arguments.scale_factor.unwrap());
+    // Size of desired image
+    let img_size = arguments.img_size.unwrap();
 
     for unicode in valid_unicode_ranges {
         // Get the glyph associated with the unicode
         let glyph = font.glyph(unicode);
-        // Check to see if we have something other than .notdef
+        // Skip the glyph if we are dealing with .notdef
         if glyph.id().0 == 0 {
             continue;
         }
+        let scale = get_scale(glyph.clone(), &img_size)?;
         // Scale it and position at {0, 0}
         let positioned_glyph = glyph.scaled(scale).positioned(point(0.0, 0.0));
         debug!("Dealing with unicode: {:?}", unicode);
@@ -162,15 +189,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // Grab the height and width of the glyph
             let glyph_height = bounding_box.get_glyph_height();
             let glyph_width = bounding_box.get_glyph_width();
+            // Find the greatest size
+            let max_sz = std::cmp::max(glyph_height, glyph_width);
             debug!("Glyph WxH: {}x{}", &glyph_width, &glyph_height);
 
-            // Create a new 8-bit RGBA image
-            let mut image = DynamicImage::new_rgba8(glyph_width, glyph_height).to_rgba8();
+            // Create a new 8-bit RGBA square image
+            let mut image = DynamicImage::new_rgba8(max_sz, max_sz).to_rgba8();
+            // Calculate x/y offsets before calling the draw command for a slight
+            // optimization
+            let x_offset = (max_sz - glyph_width) / 2;
+            let y_offset = (max_sz - glyph_height) / 2;
             // Draw the single pixel into the image
             positioned_glyph.draw(|x, y, v| {
                 image.put_pixel(
-                    x as u32,
-                    y as u32,
+                    x + x_offset as u32,
+                    y + y_offset as u32,
                     Rgba([
                         output_color.0,
                         output_color.1,
@@ -195,13 +228,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // And save the image in our output directory
                 image.save(format!("{}/{}_image.png", &output_dir, &hex_name))?;
             } else {
-                panic!("Output directory is not specified!");
+                return Err(AppError::General("Output directory is not specified"));
             }
         }
         // Otherwise what has happened? Why couldn't we get the pixel bounding
         // box?
         else {
-            warn!("Failed to get pixel bounding box for unicode: {}", &unicode);
+            return Err(AppError::FormattedMessage(format!(
+                "Failed to get pixel bounding box for unicode: {}",
+                &unicode
+            )));
         }
     }
     Ok(())
