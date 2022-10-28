@@ -9,6 +9,8 @@ pub enum AppError {
     ImageError(image::ImageError),
     /// General error
     General(&'static str),
+    /// Error when a glyph is not defined
+    GlyphNotDefined(char),
     /// Formatted message error
     FormattedMessage(String),
 }
@@ -20,6 +22,7 @@ impl fmt::Display for AppError {
             AppError::Io(e) => ("IO", e.to_string()),
             AppError::ImageError(e) => ("ImageError", e.to_string()),
             AppError::General(e) => ("app", format!("Error: {}", e)),
+            AppError::GlyphNotDefined(e) => ("app", format!("Glyph not defined for: {}", e)),
             AppError::FormattedMessage(e) => ("app", e.to_string()),
         };
         write!(f, "error in {}: {}", module, e)
@@ -32,6 +35,7 @@ impl error::Error for AppError {
             AppError::Io(e) => e,
             AppError::ImageError(e) => e,
             AppError::General(_e) => return None,
+            AppError::GlyphNotDefined(_e) => return None,
             AppError::FormattedMessage(_e) => return None,
         })
     }
