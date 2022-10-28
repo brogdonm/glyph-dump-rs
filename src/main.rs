@@ -3,10 +3,11 @@ use image::{DynamicImage, Rgba};
 use log::debug;
 use rustc_serialize::{self, hex::ToHex};
 use rusttype::{point, Font, Glyph, Rect, Scale};
-use std::{fs, sync, path::Path};
+use std::{fs, sync, path::{Path, PathBuf}};
 use unicode_categories::UnicodeCategories;
 mod error;
 use crate::error::AppError;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 /// Representation of a color
@@ -140,16 +141,21 @@ fn get_scale(glyph: Glyph, img_size: &u32) -> Result<Scale, AppError> {
     Ok(Scale::uniform(scale_factor))
 }
 
-fn create_glyph_img<BD>(font: &sync::Arc<Font>, unicode: char, img_size: u32, output_color: &(u8, u8, u8), base_dir: BD) -> Result<Option<String>, AppError> 
+/// Creates an image for a glyph mapped to the specified unicode value
+fn create_glyph_img<BD>(
+    font: &Font,
+    unicode: char,
+    img_size: u32,
+    output_color: &(u8, u8, u8),
+    base_dir: BD) -> Result<Option<String>, AppError>
 where
     BD: AsRef<Path>,
     {
-    let mut image_path = Some("".to_owned());
     // Get the glyph associated with the unicode
     let glyph = font.glyph(unicode);
     // Skip the glyph if we are dealing with .notdef
     if glyph.id().0 == 0 {
-        return Ok(image_path);
+        return Err(AppError::GlyphNotDefined(unicode));
     }
     let scale = get_scale(glyph.clone(), &img_size)?;
     // Scale it and position at {0, 0}
@@ -189,19 +195,27 @@ where
 
         // Create a prefix for the unicode in a hex string
         let hex_name = unicode.to_string().as_bytes().to_hex();
-        image_path = Some(format!("{}/{}_image.png", base_dir.as_ref().to_str().unwrap(), &hex_name));
+        // Build up the image path from the base directory
+        let mut image_path_buf = PathBuf::from(base_dir.as_ref());
+        image_path_buf.push(format!("{}_image.png", &hex_name));
+        let image_path = Some(image_path_buf
+            .into_os_string()
+            .to_str()
+            .ok_or(AppError::General("Failed to convert path to string"))?
+            .to_string()
+            );
         // And save the image in our output directory
         image.save(image_path.as_ref().unwrap())?;
+        Ok(image_path)
     }
     // Otherwise what has happened? Why couldn't we get the pixel bounding
     // box?
     else {
-        return Err(AppError::FormattedMessage(format!(
+        Err(AppError::FormattedMessage(format!(
             "Failed to get pixel bounding box for unicode: {}",
             &unicode
-        )));
+        )))
     }
-    Ok(image_path)
 }
 
 #[tokio::main]
@@ -235,7 +249,7 @@ async fn main() -> Result<(), AppError> {
     let output_color = (color_arg.red, color_arg.green, color_arg.blue);
     // Size of desired image
     let img_size = arguments.img_size.unwrap();
-    let base_dir: String;
+    let mut base_dir = PathBuf::new();
     // If we have an output directory, which we should since we
     // are setting up the arguments, but still need to check
     if let Some(output_dir) = arguments.output_dir.as_ref() {
@@ -243,23 +257,36 @@ async fn main() -> Result<(), AppError> {
         let base_name = get_base_name(&arguments.font_file)?;
         // And build up the final output directory using the base
         // name.
-        base_dir = format!("{}/{}", output_dir, base_name);
+        base_dir.push(&output_dir);
+        base_dir.push(&base_name);
         // Create the directory tree
-        fs::create_dir_all(&base_dir)?;
+        fs::create_dir_all(base_dir.as_path())?;
     } else {
         return Err(AppError::General("Output directory is not specified"));
     }
 
-    let base_dir_path: &Path = Path::new(&base_dir);
     // The following can be used to control the number of threads globally for
     // benchmarking
-    //let _ = rayon::ThreadPoolBuilder::new().num_threads(8).build_global().unwrap();
+    //#[cfg(feature = "parallel")]
+    //rayon::ThreadPoolBuilder::new().num_threads(1).stack_size(1024*1024).build_global().unwrap();
 
+    // If parallel processing is enabled, then use the parallel iterator
+    #[cfg(feature = "parallel")]
     let image_paths: Vec<_> = valid_unicode_ranges
         .par_iter()
         .map(|unicode| {
-            create_glyph_img(&font, *unicode, img_size, &output_color, base_dir_path)
-        }).filter_map(|x| x.err())
+            let safe = sync::Arc::clone(&font);
+            create_glyph_img(&safe, *unicode, img_size, &output_color, base_dir.as_path())
+        }).filter_map(|x| x.ok())
+        .collect();
+    // Otherwise, we will will just iterate through them one at a time
+    #[cfg(not(feature = "parallel"))]
+    let image_paths: Vec<_> = valid_unicode_ranges
+        .iter()
+        .map(|unicode| {
+            let safe = sync::Arc::clone(&font);
+            create_glyph_img(&safe, *unicode, img_size, &output_color, base_dir_path)
+        }).filter_map(|x| x.ok())
         .collect();
     for image_path in image_paths {
         debug!("Created image: {:?}", image_path);
