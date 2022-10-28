@@ -19,7 +19,7 @@ impl fmt::Display for AppError {
         let (module, e) = match self {
             AppError::Io(e) => ("IO", e.to_string()),
             AppError::ImageError(e) => ("ImageError", e.to_string()),
-            AppError::General(e) => ("app", format!("Error: {}", e.to_string())),
+            AppError::General(e) => ("app", format!("Error: {}", e)),
             AppError::FormattedMessage(e) => ("app", e.to_string()),
         };
         write!(f, "error in {}: {}", module, e)

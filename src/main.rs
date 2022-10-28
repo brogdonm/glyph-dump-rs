@@ -108,7 +108,7 @@ fn get_base_name(file_path: &str) -> Result<String, AppError> {
             ))
         })?
         .to_str()
-        .ok_or_else(|| AppError::General("Failed to convert base name to str"))?;
+        .ok_or(AppError::General("Failed to convert base name to str"))?;
     Ok(base_name.to_owned())
 }
 
@@ -119,7 +119,9 @@ fn get_scale(glyph: Glyph, img_size: &u32) -> Result<Scale, AppError> {
     let one_to_one_scaling = glyph
         .scaled(Scale::uniform(1.0))
         .exact_bounding_box()
-        .ok_or_else(|| AppError::General("Failed to get exact bounding box for glyph"))?;
+        .ok_or(AppError::General(
+            "Failed to get exact bounding box for glyph",
+        ))?;
     // Calculate the height and width of the glyph
     let height: f32 = one_to_one_scaling.max.y - one_to_one_scaling.min.y;
     let width: f32 = one_to_one_scaling.max.x - one_to_one_scaling.min.x;
@@ -144,10 +146,12 @@ async fn main() -> Result<(), AppError> {
     debug!("Command line arguments: {:#?}", &arguments);
 
     let font_data = std::fs::read(&arguments.font_file)?;
-    let font = Font::try_from_vec(font_data).ok_or(AppError::FormattedMessage(format!(
-        "Failed to parse data from file: {}",
-        &arguments.font_file
-    )))?;
+    let font = Font::try_from_vec(font_data).ok_or_else(|| {
+        AppError::FormattedMessage(format!(
+            "Failed to parse data from file: {}",
+            &arguments.font_file
+        ))
+    })?;
     // Filter down the range to valid codes for printing
     let valid_unicode_ranges = ('\u{0000}'..'\u{10FFFF}').filter(|c| {
         c.is_alphabetic()
@@ -184,15 +188,17 @@ async fn main() -> Result<(), AppError> {
             // Grab the height and width of the glyph
             let glyph_height = bounding_box.get_glyph_height();
             let glyph_width = bounding_box.get_glyph_width();
+            // Find the greatest size
+            let max_sz = std::cmp::max(glyph_height, glyph_width);
             debug!("Glyph WxH: {}x{}", &glyph_width, &glyph_height);
 
-            // Create a new 8-bit RGBA image
-            let mut image = DynamicImage::new_rgba8(glyph_width, glyph_height).to_rgba8();
+            // Create a new 8-bit RGBA square image
+            let mut image = DynamicImage::new_rgba8(max_sz, max_sz).to_rgba8();
             // Draw the single pixel into the image
             positioned_glyph.draw(|x, y, v| {
                 image.put_pixel(
-                    x as u32,
-                    y as u32,
+                    x + ((max_sz - glyph_width) / 2) as u32,
+                    y + ((max_sz - glyph_height) / 2) as u32,
                     Rgba([
                         output_color.0,
                         output_color.1,
