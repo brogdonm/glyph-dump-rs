@@ -1,11 +1,12 @@
 use auto_args::AutoArgs;
 use image::{DynamicImage, Rgba};
-use log::{debug, warn};
+use log::debug;
 use rustc_serialize::{self, hex::ToHex};
-use rusttype::{point, Font, Rect, Scale};
-use std::error::Error;
+use rusttype::{point, Font, Glyph, Rect, Scale};
 use std::fs;
 use unicode_categories::UnicodeCategories;
+mod error;
+use crate::error::AppError;
 
 /// Representation of a color
 #[derive(Debug, AutoArgs)]
@@ -18,16 +19,6 @@ struct Color {
     pub blue: u8,
 }
 
-impl Default for Color {
-    fn default() -> Self {
-        Self {
-            red: 255,
-            green: 255,
-            blue: 255,
-        }
-    }
-}
-
 /// Structure for the command line arguments.
 #[derive(Debug, AutoArgs)]
 struct CliArgs {
@@ -38,7 +29,7 @@ struct CliArgs {
     /// Optional color used for output (defaults to [255, 255, 255])
     pub color: Option<Color>,
     /// Size to make the image for each glyph (defaults to 128)
-    pub img_size: Option<i32>
+    pub img_size: Option<u32>,
 }
 
 impl Default for CliArgs {
@@ -46,14 +37,18 @@ impl Default for CliArgs {
         Self {
             font_file: Default::default(),
             output_dir: Some("out".to_owned()),
-            color: Some(Color::default()),
-            img_size: Some(128)
+            color: Some(Color {
+                red: 255,
+                green: 255,
+                blue: 255,
+            }),
+            img_size: Some(128),
         }
     }
 }
 
 /// Gets the command line arguments
-fn get_cli_args() -> Result<CliArgs, Box<dyn Error>> {
+fn get_cli_args() -> Result<CliArgs, AppError> {
     let mut args = CliArgs::from_args();
     // We will need to fill out defaults for what was not supplied
     let default_args: CliArgs = CliArgs::default();
@@ -100,72 +95,70 @@ impl GlyphDimensions for Rect<i32> {
         }
     }
 }
-impl GlyphDimensions for Rect<f32> {
-    fn get_glyph_height(&self) -> u32 {
-        {
-            let min_y = self.min.y;
-            let max_y = self.max.y;
-            (min_y - max_y).ceil().abs() as u32
-        }
-    }
-
-    fn get_glyph_width(&self) -> u32 {
-        {
-            let min_x = self.min.x;
-            let max_x = self.max.x;
-            (max_x - min_x).ceil() as u32
-        }
-    }
-}
 
 /// Gets the base name of the specified file path.
-fn get_base_name(file_path: &str) -> Result<String, Box<dyn Error>> {
+fn get_base_name(file_path: &str) -> Result<String, AppError> {
     // Grab the base name of the font file
     let base_name = std::path::Path::new(file_path)
         .file_name()
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to get base name of file_path: {}", file_path),
-            )
+            AppError::FormattedMessage(format!(
+                "Failed to get file name for file path: {}",
+                file_path
+            ))
         })?
         .to_str()
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to convert base name of file_path to &str",
-            )
-        })?;
+        .ok_or_else(|| AppError::General("Failed to convert base name to str"))?;
     Ok(base_name.to_owned())
 }
 
-fn get_scale(font: &Font, unicode_id: char, img_size: &i32) -> Result<Scale, Box<dyn Error>> {
-    let one_to_one_scaling = font.glyph(unicode_id).scaled(Scale::uniform(1.0)).exact_bounding_box().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, ""))?;
-    let new_sca_h: f32 = one_to_one_scaling.max.y - one_to_one_scaling.min.y;
-    let new_sca_w: f32 = one_to_one_scaling.max.x - one_to_one_scaling.min.x;
-    let set_vals: Vec<f32> = vec![new_sca_w, new_sca_h];
-    let max_val = set_vals.iter().max_by(|x,y| x.abs().partial_cmp(&y.abs()).unwrap()).unwrap().abs();
-    let f_img_size = *img_size as f32;
-    let s_factor = (f_img_size / max_val).floor();
-    Ok(Scale::uniform(s_factor))
+fn get_scale(glyph: Glyph, img_size: &u32) -> Result<Scale, AppError> {
+    // We can get at the x/y min/max of the glyph directly, so we use a little
+    // trick of scaling by 1.0 to get the exact bounding box to get the
+    // dimensions.
+    let one_to_one_scaling = glyph
+        .scaled(Scale::uniform(1.0))
+        .exact_bounding_box()
+        .ok_or_else(|| AppError::General("Failed to get exact bounding box for glyph"))?;
+    // Calculate the height and width of the glyph
+    let height: f32 = one_to_one_scaling.max.y - one_to_one_scaling.min.y;
+    let width: f32 = one_to_one_scaling.max.x - one_to_one_scaling.min.x;
+    // Create a vector so we can find the max
+    let dimensions: Vec<f32> = vec![height, width];
+    // Iterate through the values and find the largest one
+    let max_dimension = dimensions
+        .iter()
+        .max_by(|x, y| x.abs().partial_cmp(&y.abs()).unwrap())
+        .unwrap()
+        .abs();
+    // Find the scaling factor
+    let scale_factor = ((*img_size as f32) / max_dimension).floor();
+    // And create a uniform scale from it
+    Ok(Scale::uniform(scale_factor))
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), AppError> {
     env_logger::init();
     let arguments = get_cli_args()?;
     debug!("Command line arguments: {:#?}", &arguments);
 
     let font_data = std::fs::read(&arguments.font_file)?;
-    let font = Font::try_from_vec(font_data).unwrap_or_else(|| {
-        panic!(
-            "Error constructing font from file: {:?}",
-            &arguments.font_file
-        );
-    });
+    let font = Font::try_from_vec(font_data).ok_or(AppError::FormattedMessage(format!(
+        "Failed to parse data from file: {}",
+        &arguments.font_file
+    )))?;
     // Filter down the range to valid codes for printing
-    let valid_unicode_ranges = ('\u{0000}'..'\u{10FFFF}')
-        .filter(|c| c.is_alphabetic() || c.is_alphanumeric() || c.is_letter_other() || c.is_symbol_other() || c.is_punctuation() || c.is_letter_modifier() || c.is_symbol_modifier() || c.is_symbol());
+    let valid_unicode_ranges = ('\u{0000}'..'\u{10FFFF}').filter(|c| {
+        c.is_alphabetic()
+            || c.is_alphanumeric()
+            || c.is_letter_other()
+            || c.is_symbol_other()
+            || c.is_punctuation()
+            || c.is_letter_modifier()
+            || c.is_symbol_modifier()
+            || c.is_symbol()
+    });
     // Use a black color as output
     let color_arg = arguments.color.unwrap();
     let output_color = (color_arg.red, color_arg.green, color_arg.blue);
@@ -179,7 +172,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if glyph.id().0 == 0 {
             continue;
         }
-        let scale = get_scale(&font, unicode, &img_size)?;
+        let scale = get_scale(glyph.clone(), &img_size)?;
         // Scale it and position at {0, 0}
         let positioned_glyph = glyph.scaled(scale).positioned(point(0.0, 0.0));
         debug!("Dealing with unicode: {:?}", unicode);
@@ -224,13 +217,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // And save the image in our output directory
                 image.save(format!("{}/{}_image.png", &output_dir, &hex_name))?;
             } else {
-                panic!("Output directory is not specified!");
+                return Err(AppError::General("Output directory is not specified"));
             }
         }
         // Otherwise what has happened? Why couldn't we get the pixel bounding
         // box?
         else {
-            warn!("Failed to get pixel bounding box for unicode: {}", &unicode);
+            return Err(AppError::FormattedMessage(format!(
+                "Failed to get pixel bounding box for unicode: {}",
+                &unicode
+            )));
         }
     }
     Ok(())
