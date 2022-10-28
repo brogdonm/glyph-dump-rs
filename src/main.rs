@@ -162,6 +162,7 @@ async fn main() -> Result<(), AppError> {
             || c.is_letter_modifier()
             || c.is_symbol_modifier()
             || c.is_symbol()
+        /* Should others be included?? */
     });
     // Use a black color as output
     let color_arg = arguments.color.unwrap();
@@ -172,7 +173,7 @@ async fn main() -> Result<(), AppError> {
     for unicode in valid_unicode_ranges {
         // Get the glyph associated with the unicode
         let glyph = font.glyph(unicode);
-        // Check to see if we have something other than .notdef
+        // Skip the glyph if we are dealing with .notdef
         if glyph.id().0 == 0 {
             continue;
         }
@@ -194,11 +195,15 @@ async fn main() -> Result<(), AppError> {
 
             // Create a new 8-bit RGBA square image
             let mut image = DynamicImage::new_rgba8(max_sz, max_sz).to_rgba8();
+            // Calculate x/y offsets before calling the draw command for a slight
+            // optimization
+            let x_offset = (max_sz - glyph_width) / 2;
+            let y_offset = (max_sz - glyph_height) / 2;
             // Draw the single pixel into the image
             positioned_glyph.draw(|x, y, v| {
                 image.put_pixel(
-                    x + ((max_sz - glyph_width) / 2) as u32,
-                    y + ((max_sz - glyph_height) / 2) as u32,
+                    x + x_offset as u32,
+                    y + y_offset as u32,
                     Rgba([
                         output_color.0,
                         output_color.1,
