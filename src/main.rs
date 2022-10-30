@@ -3,7 +3,11 @@ use image::{DynamicImage, Rgba};
 use log::debug;
 use rustc_serialize::{self, hex::ToHex};
 use rusttype::{point, Font, Glyph, Rect, Scale};
-use std::{fs, sync, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync,
+};
 use unicode_categories::UnicodeCategories;
 mod error;
 use crate::error::AppError;
@@ -32,6 +36,9 @@ struct CliArgs {
     pub color: Option<Color>,
     /// Size to make the image for each glyph (defaults to 128)
     pub img_size: Option<u32>,
+    #[cfg(feature = "parallel")]
+    /// Optional number of threads to configure the thread pool for.
+    pub number_of_threads: Option<usize>,
 }
 
 impl Default for CliArgs {
@@ -45,6 +52,8 @@ impl Default for CliArgs {
                 blue: 255,
             }),
             img_size: Some(128),
+            #[cfg(feature = "parallel")]
+            number_of_threads: None,
         }
     }
 }
@@ -147,10 +156,11 @@ fn create_glyph_img<BD>(
     unicode: char,
     img_size: u32,
     output_color: &(u8, u8, u8),
-    base_dir: BD) -> Result<Option<String>, AppError>
+    base_dir: BD,
+) -> Result<Option<String>, AppError>
 where
     BD: AsRef<Path>,
-    {
+{
     // Get the glyph associated with the unicode
     let glyph = font.glyph(unicode);
     // Skip the glyph if we are dealing with .notdef
@@ -198,12 +208,13 @@ where
         // Build up the image path from the base directory
         let mut image_path_buf = PathBuf::from(base_dir.as_ref());
         image_path_buf.push(format!("{}_image.png", &hex_name));
-        let image_path = Some(image_path_buf
-            .into_os_string()
-            .to_str()
-            .ok_or(AppError::General("Failed to convert path to string"))?
-            .to_string()
-            );
+        let image_path = Some(
+            image_path_buf
+                .into_os_string()
+                .to_str()
+                .ok_or(AppError::General("Failed to convert path to string"))?
+                .to_string(),
+        );
         // And save the image in our output directory
         image.save(image_path.as_ref().unwrap())?;
         Ok(image_path)
@@ -218,8 +229,7 @@ where
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), AppError> {
+fn main() -> Result<(), AppError> {
     env_logger::init();
     let arguments = get_cli_args()?;
     debug!("Command line arguments: {:#?}", &arguments);
@@ -232,18 +242,19 @@ async fn main() -> Result<(), AppError> {
         ))
     })?);
     // Filter down the range to valid codes for printing
-    let valid_unicode_ranges: Vec<_> = ('\u{0000}'..'\u{10FFFF}').filter(|c| {
-        c.is_alphabetic()
-            || c.is_alphanumeric()
-            || c.is_letter_other()
-            || c.is_symbol_other()
-            || c.is_punctuation()
-            || c.is_letter_modifier()
-            || c.is_symbol_modifier()
-            || c.is_symbol()
-        /* Should others be included?? */
-    })
-    .collect();
+    let valid_unicode_ranges: Vec<_> = ('\u{0000}'..'\u{10FFFF}')
+        .filter(|c| {
+            c.is_alphabetic()
+                || c.is_alphanumeric()
+                || c.is_letter_other()
+                || c.is_symbol_other()
+                || c.is_punctuation()
+                || c.is_letter_modifier()
+                || c.is_symbol_modifier()
+                || c.is_symbol()
+            /* Should others be included?? */
+        })
+        .collect();
     // Use a black color as output
     let color_arg = arguments.color.unwrap();
     let output_color = (color_arg.red, color_arg.green, color_arg.blue);
@@ -265,10 +276,15 @@ async fn main() -> Result<(), AppError> {
         return Err(AppError::General("Output directory is not specified"));
     }
 
-    // The following can be used to control the number of threads globally for
-    // benchmarking
-    //#[cfg(feature = "parallel")]
-    //rayon::ThreadPoolBuilder::new().num_threads(1).stack_size(1024*1024).build_global().unwrap();
+    // If user provided a specific number of threads to use in the thread pool,
+    // configure the global rayon thread pool appropriately.
+    #[cfg(feature = "parallel")]
+    if let Some(count) = arguments.number_of_threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(count)
+            .build_global()
+            .unwrap();
+    }
 
     // If parallel processing is enabled, then use the parallel iterator
     #[cfg(feature = "parallel")]
@@ -277,7 +293,8 @@ async fn main() -> Result<(), AppError> {
         .map(|unicode| {
             let safe = sync::Arc::clone(&font);
             create_glyph_img(&safe, *unicode, img_size, &output_color, base_dir.as_path())
-        }).filter_map(|x| x.ok())
+        })
+        .filter_map(|x| x.ok())
         .collect();
     // Otherwise, we will will just iterate through them one at a time
     #[cfg(not(feature = "parallel"))]
@@ -286,7 +303,8 @@ async fn main() -> Result<(), AppError> {
         .map(|unicode| {
             let safe = sync::Arc::clone(&font);
             create_glyph_img(&safe, *unicode, img_size, &output_color, base_dir.as_path())
-        }).filter_map(|x| x.ok())
+        })
+        .filter_map(|x| x.ok())
         .collect();
     for image_path in image_paths {
         debug!("Created image: {:?}", image_path);
