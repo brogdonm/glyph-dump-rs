@@ -22,8 +22,7 @@ jobs:
         features: [ --all-features, --no-default-features ]
         include:
           - os: ubuntu-latest
-            cargo-dir-path: /home/runner/.cargo/
-            cache-dir: /home/runner/
+            cargo-dir-path: ~/.cargo/
     env:
       RUST_BACKTRACE: full
       RUSTV: ${{ matrix.rust }}
@@ -32,11 +31,17 @@ jobs:
     - uses: actions/cache@v3
       with:
         path: |
-          ${{ matrix.cache-dir-path }}bin
-          ${{ matrix.cache-dir-path }}registry/index/
-          ${{ matrix.cache-dir-path }}registry/cache/
-          ${{ matrix.cache-dir-path }}git/db/
+          ${{ matrix.cargo-dir-path }}bin
+          ${{ matrix.cargo-dir-path }}registry/index/
+          ${{ matrix.cargo-dir-path }}registry/cache/
+          ${{ matrix.cargo-dir-path }}git/db/
         key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    - uses: actions/cache@v3
+      if: ${{ github.event_name == 'pull_request' && github.head_ref == 'refs/heads/dev' }}
+      with:
+        path: |
+          target
+        key: ${{ matrix.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
     - name: Build
       run: cargo build ${{ matrix.features }} --verbose
     - name: Clippy
