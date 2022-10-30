@@ -37,12 +37,12 @@ jobs:
           ${{ matrix.cargo-dir-path }}git/db/
         key: ${{ matrix.os }}-cargo-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
     - uses: actions/cache@v3
-      if: ${{ github.event_name == 'pull_request' && github.head_ref == 'refs/heads/dev' }}
+      if: ${{ github.event_name == 'pull_request' && github.base_ref == 'refs/heads/dev' }}
       with:
         path: |
           target
         key: ${{ matrix.os }}-cargo-target-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
     - name: Build
-      run: cargo build ${{ matrix.features }} --verbose
+      run: cargo build ${{ matrix.features }}
     - name: Clippy
-      run: cargo clippy ${{ matrix.features }} --verbose
+      run: cargo clippy ${{ matrix.features }}
