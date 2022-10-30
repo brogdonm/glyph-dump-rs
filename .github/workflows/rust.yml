@@ -21,12 +21,8 @@ jobs:
         rust: [ stable ]
         # List of feature builds to test
         features: [ --all-features, --no-default-features ]
-        make:
-          - name: Clippy
-            task: "check-clippy"
     env:
       RUST_BACKTRACE: full
-      RUSTC_WRAPPER: sccache
       RUSTV: ${{ matrix.rust }}
     steps:
     - uses: actions/checkout@v3
