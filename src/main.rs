@@ -3,10 +3,16 @@ use image::{DynamicImage, Rgba};
 use log::debug;
 use rustc_serialize::{self, hex::ToHex};
 use rusttype::{point, Font, Glyph, Rect, Scale};
-use std::fs;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync,
+};
 use unicode_categories::UnicodeCategories;
 mod error;
 use crate::error::AppError;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Representation of a color
 #[derive(Debug, AutoArgs)]
@@ -30,6 +36,9 @@ struct CliArgs {
     pub color: Option<Color>,
     /// Size to make the image for each glyph (defaults to 128)
     pub img_size: Option<u32>,
+    #[cfg(feature = "parallel")]
+    /// Optional number of threads to configure the thread pool for.
+    pub number_of_threads: Option<usize>,
 }
 
 impl Default for CliArgs {
@@ -43,6 +52,8 @@ impl Default for CliArgs {
                 blue: 255,
             }),
             img_size: Some(128),
+            #[cfg(feature = "parallel")]
+            number_of_threads: None,
         }
     }
 }
@@ -139,106 +150,164 @@ fn get_scale(glyph: Glyph, img_size: &u32) -> Result<Scale, AppError> {
     Ok(Scale::uniform(scale_factor))
 }
 
-#[tokio::main]
-async fn main() -> Result<(), AppError> {
+/// Creates an image for a glyph mapped to the specified unicode value
+fn create_glyph_img<BD>(
+    font: &Font,
+    unicode: char,
+    img_size: u32,
+    output_color: &(u8, u8, u8),
+    base_dir: BD,
+) -> Result<Option<String>, AppError>
+where
+    BD: AsRef<Path>,
+{
+    // Get the glyph associated with the unicode
+    let glyph = font.glyph(unicode);
+    // Skip the glyph if we are dealing with .notdef
+    if glyph.id().0 == 0 {
+        return Err(AppError::GlyphNotDefined(unicode));
+    }
+    let scale = get_scale(glyph.clone(), &img_size)?;
+    // Scale it and position at {0, 0}
+    let positioned_glyph = glyph.scaled(scale).positioned(point(0.0, 0.0));
+    debug!("Dealing with unicode: {:?}", unicode);
+
+    // If we have a pixel bounding box for the glyph, we can draw it into
+    // an image
+    if let Some(bounding_box) = positioned_glyph.pixel_bounding_box() {
+        debug!("\tBounding box: {:#?}", &bounding_box);
+        // Grab the height and width of the glyph
+        let glyph_height = bounding_box.get_glyph_height();
+        let glyph_width = bounding_box.get_glyph_width();
+        // Find the greatest size
+        let max_sz = std::cmp::max(glyph_height, glyph_width);
+        debug!("Glyph WxH: {}x{}", &glyph_width, &glyph_height);
+
+        // Create a new 8-bit RGBA square image
+        let mut image = DynamicImage::new_rgba8(max_sz, max_sz).to_rgba8();
+        // Calculate x/y offsets before calling the draw command for a slight
+        // optimization
+        let x_offset = (max_sz - glyph_width) / 2;
+        let y_offset = (max_sz - glyph_height) / 2;
+        // Draw the single pixel into the image
+        positioned_glyph.draw(|x, y, v| {
+            image.put_pixel(
+                x + x_offset as u32,
+                y + y_offset as u32,
+                Rgba([
+                    output_color.0,
+                    output_color.1,
+                    output_color.2,
+                    (v * 255.0) as u8,
+                ]),
+            );
+        });
+
+        // Create a prefix for the unicode in a hex string
+        let hex_name = unicode.to_string().as_bytes().to_hex();
+        // Build up the image path from the base directory
+        let mut image_path_buf = PathBuf::from(base_dir.as_ref());
+        image_path_buf.push(format!("{}_image.png", &hex_name));
+        let image_path = Some(
+            image_path_buf
+                .into_os_string()
+                .to_str()
+                .ok_or(AppError::General("Failed to convert path to string"))?
+                .to_string(),
+        );
+        // And save the image in our output directory
+        image.save(image_path.as_ref().unwrap())?;
+        Ok(image_path)
+    }
+    // Otherwise what has happened? Why couldn't we get the pixel bounding
+    // box?
+    else {
+        Err(AppError::FormattedMessage(format!(
+            "Failed to get pixel bounding box for unicode: {}",
+            &unicode
+        )))
+    }
+}
+
+fn main() -> Result<(), AppError> {
     env_logger::init();
     let arguments = get_cli_args()?;
     debug!("Command line arguments: {:#?}", &arguments);
 
     let font_data = std::fs::read(&arguments.font_file)?;
-    let font = Font::try_from_vec(font_data).ok_or_else(|| {
+    let font = sync::Arc::new(Font::try_from_vec(font_data).ok_or_else(|| {
         AppError::FormattedMessage(format!(
             "Failed to parse data from file: {}",
             &arguments.font_file
         ))
-    })?;
+    })?);
     // Filter down the range to valid codes for printing
-    let valid_unicode_ranges = ('\u{0000}'..'\u{10FFFF}').filter(|c| {
-        c.is_alphabetic()
-            || c.is_alphanumeric()
-            || c.is_letter_other()
-            || c.is_symbol_other()
-            || c.is_punctuation()
-            || c.is_letter_modifier()
-            || c.is_symbol_modifier()
-            || c.is_symbol()
-        /* Should others be included?? */
-    });
+    let valid_unicode_ranges: Vec<_> = ('\u{0000}'..'\u{10FFFF}')
+        .filter(|c| {
+            c.is_alphabetic()
+                || c.is_alphanumeric()
+                || c.is_letter_other()
+                || c.is_symbol_other()
+                || c.is_punctuation()
+                || c.is_letter_modifier()
+                || c.is_symbol_modifier()
+                || c.is_symbol()
+            /* Should others be included?? */
+        })
+        .collect();
     // Use a black color as output
     let color_arg = arguments.color.unwrap();
     let output_color = (color_arg.red, color_arg.green, color_arg.blue);
     // Size of desired image
     let img_size = arguments.img_size.unwrap();
+    let mut base_dir = PathBuf::new();
+    // If we have an output directory, which we should since we
+    // are setting up the arguments, but still need to check
+    if let Some(output_dir) = arguments.output_dir.as_ref() {
+        // Grab the base name of the font file
+        let base_name = get_base_name(&arguments.font_file)?;
+        // And build up the final output directory using the base
+        // name.
+        base_dir.push(&output_dir);
+        base_dir.push(&base_name);
+        // Create the directory tree
+        fs::create_dir_all(base_dir.as_path())?;
+    } else {
+        return Err(AppError::General("Output directory is not specified"));
+    }
 
-    for unicode in valid_unicode_ranges {
-        // Get the glyph associated with the unicode
-        let glyph = font.glyph(unicode);
-        // Skip the glyph if we are dealing with .notdef
-        if glyph.id().0 == 0 {
-            continue;
-        }
-        let scale = get_scale(glyph.clone(), &img_size)?;
-        // Scale it and position at {0, 0}
-        let positioned_glyph = glyph.scaled(scale).positioned(point(0.0, 0.0));
-        debug!("Dealing with unicode: {:?}", unicode);
+    // If user provided a specific number of threads to use in the thread pool,
+    // configure the global rayon thread pool appropriately.
+    #[cfg(feature = "parallel")]
+    if let Some(count) = arguments.number_of_threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(count)
+            .build_global()
+            .unwrap();
+    }
 
-        // If we have a pixel bounding box for the glyph, we can draw it into
-        // an image
-        if let Some(bounding_box) = positioned_glyph.pixel_bounding_box() {
-            debug!("\tBounding box: {:#?}", &bounding_box);
-            // Grab the height and width of the glyph
-            let glyph_height = bounding_box.get_glyph_height();
-            let glyph_width = bounding_box.get_glyph_width();
-            // Find the greatest size
-            let max_sz = std::cmp::max(glyph_height, glyph_width);
-            debug!("Glyph WxH: {}x{}", &glyph_width, &glyph_height);
-
-            // Create a new 8-bit RGBA square image
-            let mut image = DynamicImage::new_rgba8(max_sz, max_sz).to_rgba8();
-            // Calculate x/y offsets before calling the draw command for a slight
-            // optimization
-            let x_offset = (max_sz - glyph_width) / 2;
-            let y_offset = (max_sz - glyph_height) / 2;
-            // Draw the single pixel into the image
-            positioned_glyph.draw(|x, y, v| {
-                image.put_pixel(
-                    x + x_offset as u32,
-                    y + y_offset as u32,
-                    Rgba([
-                        output_color.0,
-                        output_color.1,
-                        output_color.2,
-                        (v * 255.0) as u8,
-                    ]),
-                );
-            });
-
-            // If we have an output directory, which we should since we
-            // are setting up the arguments, but still need to check
-            if let Some(output_dir) = arguments.output_dir.as_ref() {
-                // Grab the base name of the font file
-                let base_name = get_base_name(&arguments.font_file)?;
-                // And build up the final output directory using the base
-                // name.
-                let output_dir = &format!("{}/{}", output_dir, base_name);
-                // Create the directory tree
-                fs::create_dir_all(output_dir)?;
-                // Create a prefix for the unicode in a hex string
-                let hex_name = unicode.to_string().as_bytes().to_hex();
-                // And save the image in our output directory
-                image.save(format!("{}/{}_image.png", &output_dir, &hex_name))?;
-            } else {
-                return Err(AppError::General("Output directory is not specified"));
-            }
-        }
-        // Otherwise what has happened? Why couldn't we get the pixel bounding
-        // box?
-        else {
-            return Err(AppError::FormattedMessage(format!(
-                "Failed to get pixel bounding box for unicode: {}",
-                &unicode
-            )));
-        }
+    // If parallel processing is enabled, then use the parallel iterator
+    #[cfg(feature = "parallel")]
+    let image_paths: Vec<_> = valid_unicode_ranges
+        .par_iter()
+        .map(|unicode| {
+            let safe = sync::Arc::clone(&font);
+            create_glyph_img(&safe, *unicode, img_size, &output_color, base_dir.as_path())
+        })
+        .filter_map(|x| x.ok())
+        .collect();
+    // Otherwise, we will will just iterate through them one at a time
+    #[cfg(not(feature = "parallel"))]
+    let image_paths: Vec<_> = valid_unicode_ranges
+        .iter()
+        .map(|unicode| {
+            let safe = sync::Arc::clone(&font);
+            create_glyph_img(&safe, *unicode, img_size, &output_color, base_dir.as_path())
+        })
+        .filter_map(|x| x.ok())
+        .collect();
+    for image_path in image_paths {
+        debug!("Created image: {:?}", image_path);
     }
     Ok(())
 }

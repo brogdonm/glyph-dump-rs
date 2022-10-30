@@ -12,7 +12,15 @@ env_logger = "0.9.1"
 hex-string = "0.1.0"
 image = { version = "0.24.4", features = ["png"] }
 log = "0.4.17"
+rayon = { version="1.5.3", optional = true }
 rustc-serialize = "0.3.24"
 rusttype = "0.9.2"
-tokio = { version = "1.21.2", features = ["full"] }
 unicode_categories = "0.1.1"
+
+[features]
+default = [ "parallel" ]
+parallel = ["dep:rayon"]
+
+[profile.release-with-debug]
+inherits = "release"
+debug=true
