@@ -11,9 +11,8 @@ env:
 
 jobs:
   build:
-    name: ${{ matrix.make.name }} (${{ matrix.os }})
+    name: Rust, feature=${{ matrix.features }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-
     strategy:
       fail-fast: true
       matrix:
@@ -21,11 +20,23 @@ jobs:
         rust: [ stable ]
         # List of feature builds to test
         features: [ --all-features, --no-default-features ]
+        include:
+          - os: ubuntu-latest
+            cargo-dir-path: /home/runner/.cargo/
+            cache-dir: /home/runner/
     env:
       RUST_BACKTRACE: full
       RUSTV: ${{ matrix.rust }}
     steps:
     - uses: actions/checkout@v3
+    - uses: actions/cache@v3
+      with:
+        path: |
+          ${{ matrix.cache-dir-path }}bin
+          ${{ matrix.cache-dir-path }}registry/index/
+          ${{ matrix.cache-dir-path }}registry/cache/
+          ${{ matrix.cache-dir-path }}git/db/
+        key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
     - name: Build
       run: cargo build ${{ matrix.features }} --verbose
     - name: Clippy
