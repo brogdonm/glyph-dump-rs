@@ -37,7 +37,7 @@ jobs:
           ${{ matrix.cargo-dir-path }}git/db/
         key: ${{ matrix.os }}-cargo-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
     - uses: actions/cache@v3
-      if: ${{ github.event_name == 'pull_request' && github.base_ref == 'refs/heads/dev' }}
+      if: ${{ github.event.pull_request.base.ref == 'dev' }}
       with:
         path: |
           target
