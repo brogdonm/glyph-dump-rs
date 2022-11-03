@@ -1,0 +1,48 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main", "dev" ]
+  pull_request:
+    branches: [ "main", "dev" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Rust, feature=${{ matrix.features }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ ubuntu-latest ]
+        rust: [ stable ]
+        # List of feature builds to test
+        features: [ --all-features, --no-default-features ]
+        include:
+          - os: ubuntu-latest
+            cargo-dir-path: ~/.cargo/
+    env:
+      RUST_BACKTRACE: full
+      RUSTV: ${{ matrix.rust }}
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/cache@v3
+      with:
+        path: |
+          ${{ matrix.cargo-dir-path }}bin
+          ${{ matrix.cargo-dir-path }}registry/index/
+          ${{ matrix.cargo-dir-path }}registry/cache/
+          ${{ matrix.cargo-dir-path }}git/db/
+        key: ${{ matrix.os }}-cargo-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
+    - uses: actions/cache@v3
+      if: ${{ github.event.pull_request.base.ref == 'dev' }}
+      with:
+        path: |
+          target
+        key: ${{ matrix.os }}-cargo-target-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
+    - name: Build
+      run: cargo build ${{ matrix.features }}
+    - name: Clippy
+      run: cargo clippy ${{ matrix.features }}

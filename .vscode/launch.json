@@ -18,7 +18,10 @@
       },
       "args": [
         "--font-file=~/Downloads/HELVETICANOWMTTEXT.OTF",
-        "--img-size=512"
+        "--img-size=52",
+        "--unicode-range-start=f030",
+        "--unicode-range-end=1e0030",
+        "--number-of-threads=1"
 
       ],
       "cwd": "${workspaceFolder}",
