@@ -25,6 +25,70 @@ struct Color {
     pub blue: u8,
 }
 
+/// Specifies a range of unicode values to dump
+#[derive(Debug, AutoArgs)]
+struct UnicodeRange {
+    /// Starting unicode in a range (inclusive)
+    pub start: UnicodeValue,
+    /// Ending unicode in a range (inclusive)
+    pub end: UnicodeValue,
+}
+
+/// A wrapper structure around a character for parsing command line argument
+/// using AutoArgs.
+#[derive(Debug)]
+struct UnicodeValue {
+    /// The character
+    character: char,
+}
+
+/// Implementation of AutoArgs for our unicode value.
+impl AutoArgs for UnicodeValue {
+    fn parse_internal(
+        key: &str,
+        args: &mut Vec<std::ffi::OsString>,
+    ) -> Result<Self, auto_args::Error> {
+        // Parse the argument as a string first
+        let the_arg = String::parse_internal(key, args)?
+            // Removing the 0x
+            .replace("0x", "")
+            // or the U+
+            .replace("U+", "");
+
+        // Convert our input string to a hex string and then into a vector of u8 values
+        let the_arg_bytes = hex_string::HexString::from_string(&the_arg)
+            .map_err(|_| {
+                auto_args::Error::InvalidUTF8("Failed to parse argument as hex.".to_owned())
+            })?
+            .as_bytes();
+        // Setup a 32-bit array
+        let mut arg_u32: [u8; 4] = [0u8; 4];
+        // And copy in our slice from the conversion
+        arg_u32[(4 - the_arg_bytes.len())..].copy_from_slice(&the_arg_bytes[..]);
+        // Read in the value as u32 from big endian bytes
+        let val: u32 = u32::from_be_bytes(arg_u32);
+        unsafe {
+            Ok(Self {
+                character: char::from_u32_unchecked(val),
+            })
+        }
+    }
+
+    /// Input is always required when specified.
+    const REQUIRES_INPUT: bool = true;
+
+    fn tiny_help_message(key: &str) -> String {
+        format!("{} 0x00d4", key)
+    }
+}
+
+/// Conversion from our unicode value to the primitive char type.
+impl From<UnicodeValue> for char {
+    fn from(item: UnicodeValue) -> char {
+        item.character
+    }
+}
+
 /// Structure for the command line arguments.
 #[derive(Debug, AutoArgs)]
 struct CliArgs {
@@ -39,6 +103,8 @@ struct CliArgs {
     #[cfg(feature = "parallel")]
     /// Optional number of threads to configure the thread pool for.
     pub number_of_threads: Option<usize>,
+    /// Optional range (inclusively) of unicode values to dump.
+    pub unicode_range: Option<UnicodeRange>,
 }
 
 impl Default for CliArgs {
@@ -54,6 +120,7 @@ impl Default for CliArgs {
             img_size: Some(128),
             #[cfg(feature = "parallel")]
             number_of_threads: None,
+            unicode_range: None,
         }
     }
 }
@@ -150,6 +217,22 @@ fn get_scale(glyph: Glyph, img_size: &u32) -> Result<Scale, AppError> {
     Ok(Scale::uniform(scale_factor))
 }
 
+/// Converts a unicode character to a big endian hex string as 8 hex digits.
+fn convert_to_be_hex_string(unicode: char) -> Result<String, AppError> {
+    // Create a prefix for the unicode in a hex string
+    let mut encoded_utf16: [u16; 2] = [0u16; 2];
+    unicode.encode_utf16(&mut encoded_utf16);
+    let mut be_bytes: Vec<u8> = Vec::with_capacity(4);
+    // Convert to big endian bytes
+    for n in (0..2).rev() {
+        let val = encoded_utf16[n];
+        be_bytes.push((val >> 8) as u8);
+        be_bytes.push((val & 0xFF) as u8);
+    }
+    // And convert to hex
+    Ok(be_bytes.to_hex())
+}
+
 /// Creates an image for a glyph mapped to the specified unicode value
 fn create_glyph_img<BD>(
     font: &Font,
@@ -204,10 +287,10 @@ where
         });
 
         // Create a prefix for the unicode in a hex string
-        let hex_name = unicode.to_string().as_bytes().to_hex();
+        let hex_name = convert_to_be_hex_string(unicode)?;
         // Build up the image path from the base directory
         let mut image_path_buf = PathBuf::from(base_dir.as_ref());
-        image_path_buf.push(format!("{}_image.png", &hex_name));
+        image_path_buf.push(format!("{}_image.png", &hex_name[2..8]));
         let image_path = Some(
             image_path_buf
                 .into_os_string()
@@ -241,20 +324,27 @@ fn main() -> Result<(), AppError> {
             &arguments.font_file
         ))
     })?);
-    // Filter down the range to valid codes for printing
-    let valid_unicode_ranges: Vec<_> = ('\u{0000}'..'\u{10FFFF}')
-        .filter(|c| {
-            c.is_alphabetic()
-                || c.is_alphanumeric()
-                || c.is_letter_other()
-                || c.is_symbol_other()
-                || c.is_punctuation()
-                || c.is_letter_modifier()
-                || c.is_symbol_modifier()
-                || c.is_symbol()
-            /* Should others be included?? */
-        })
-        .collect();
+    let valid_unicode_ranges: Vec<_>;
+    // If user specified a range, use it
+    if let Some(unicode_range) = arguments.unicode_range {
+        valid_unicode_ranges =
+            (unicode_range.start.character..=unicode_range.end.character).collect();
+    } else {
+        // Otherwise, we will use our own range
+        valid_unicode_ranges = ('\u{0000}'..='\u{10FFFF}')
+            .filter(|c| {
+                c.is_alphabetic()
+                    || c.is_alphanumeric()
+                    || c.is_letter_other()
+                    || c.is_symbol_other()
+                    || c.is_punctuation()
+                    || c.is_letter_modifier()
+                    || c.is_symbol_modifier()
+                    || c.is_symbol()
+                /* Should others be included?? */
+            })
+            .collect();
+    }
     // Use a black color as output
     let color_arg = arguments.color.unwrap();
     let output_color = (color_arg.red, color_arg.green, color_arg.blue);
