@@ -1,7 +1,6 @@
 use clap::{arg, Parser};
 use image::{DynamicImage, Rgba};
 use log::debug;
-use rustc_serialize::{self, hex::ToHex};
 use rusttype::{point, Font, Glyph, Rect, Scale};
 use std::{
     fs,
@@ -219,7 +218,12 @@ fn convert_to_be_hex_string(unicode: char) -> Result<String, AppError> {
         be_bytes.push((val & 0xFF) as u8);
     }
     // And convert to hex
-    Ok(be_bytes.to_hex())
+    Ok(be_bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join("")
+    )
 }
 
 /// Creates an image for a glyph mapped to the specified unicode value
