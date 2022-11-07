@@ -1,11 +1,11 @@
-use auto_args::AutoArgs;
+use clap::{arg, Parser};
 use image::{DynamicImage, Rgba};
 use log::debug;
-use rustc_serialize::{self, hex::ToHex};
 use rusttype::{point, Font, Glyph, Rect, Scale};
 use std::{
     fs,
     path::{Path, PathBuf},
+    str::FromStr,
     sync,
 };
 use unicode_categories::UnicodeCategories;
@@ -15,7 +15,7 @@ use crate::error::AppError;
 use rayon::prelude::*;
 
 /// Representation of a color
-#[derive(Debug, AutoArgs)]
+#[derive(Debug, Clone)]
 struct Color {
     /// Red component
     pub red: u8,
@@ -25,8 +25,26 @@ struct Color {
     pub blue: u8,
 }
 
+impl FromStr for Color {
+    type Err = AppError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Verify the length of the hex color is in the form of #rRgGbB
+        if s.len() != 7 {
+            return Err(AppError::ColorParseError(s.to_string()));
+        }
+        // Parse the red color
+        let red = u8::from_str_radix(&s[1..3], 16)?;
+        // Parse the green color
+        let green = u8::from_str_radix(&s[3..5], 16)?;
+        // Parse the blue color
+        let blue = u8::from_str_radix(&s[5..7], 16)?;
+        Ok(Self { red, green, blue })
+    }
+}
+
 /// Specifies a range of unicode values to dump
-#[derive(Debug, AutoArgs)]
+#[derive(Debug, Clone)]
 struct UnicodeRange {
     /// Starting unicode in a range (inclusive)
     pub start: UnicodeValue,
@@ -34,33 +52,43 @@ struct UnicodeRange {
     pub end: UnicodeValue,
 }
 
+impl FromStr for UnicodeRange {
+    type Err = AppError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let pieces = s.split("..").collect::<Vec<_>>();
+        if pieces.len() != 2 {
+            return Err(AppError::InvalidRange());
+        }
+        let start = UnicodeValue::from_str(pieces[0])?;
+        let end = UnicodeValue::from_str(pieces[1])?;
+        Ok(Self { start, end })
+    }
+}
+
 /// A wrapper structure around a character for parsing command line argument
 /// using AutoArgs.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct UnicodeValue {
     /// The character
     character: char,
 }
 
-/// Implementation of AutoArgs for our unicode value.
-impl AutoArgs for UnicodeValue {
-    fn parse_internal(
-        key: &str,
-        args: &mut Vec<std::ffi::OsString>,
-    ) -> Result<Self, auto_args::Error> {
+impl FromStr for UnicodeValue {
+    type Err = AppError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         // Parse the argument as a string first
-        let the_arg = String::parse_internal(key, args)?
+        let the_arg = s
             // Removing the 0x
             .replace("0x", "")
             // or the U+
             .replace("U+", "");
 
+        if the_arg.len() > 6 {
+            return Err(AppError::OutOfRangeUnicode(s.to_string()));
+        }
         // Convert our input string to a hex string and then into a vector of u8 values
-        let the_arg_bytes = hex_string::HexString::from_string(&the_arg)
-            .map_err(|_| {
-                auto_args::Error::InvalidUTF8("Failed to parse argument as hex.".to_owned())
-            })?
-            .as_bytes();
+        let the_arg_bytes = hex_string::HexString::from_string(&the_arg)?.as_bytes();
         // Setup a 32-bit array
         let mut arg_u32: [u8; 4] = [0u8; 4];
         // And copy in our slice from the conversion
@@ -73,13 +101,6 @@ impl AutoArgs for UnicodeValue {
             })
         }
     }
-
-    /// Input is always required when specified.
-    const REQUIRES_INPUT: bool = true;
-
-    fn tiny_help_message(key: &str) -> String {
-        format!("{} 0x00d4", key)
-    }
 }
 
 /// Conversion from our unicode value to the primitive char type.
@@ -89,60 +110,28 @@ impl From<UnicodeValue> for char {
     }
 }
 
-/// Structure for the command line arguments.
-#[derive(Debug, AutoArgs)]
+/// Dumps glyphs from a specified font.
+#[derive(Parser, Debug)]
 struct CliArgs {
     /// Path to the font file to render
+    #[arg(short, long)]
     pub font_file: String,
-    /// Optional output directory for images (defaults to ./out)
-    pub output_dir: Option<String>,
-    /// Optional color used for output (defaults to [255, 255, 255])
-    pub color: Option<Color>,
-    /// Size to make the image for each glyph (defaults to 128)
-    pub img_size: Option<u32>,
+    /// Optional output directory for images
+    #[arg(short, long, default_value = "./out")]
+    pub output_dir: String,
+    /// Optional hex color used for output
+    #[arg(short, long, default_value = "#ffffff")]
+    pub color: Color,
+    /// Size to make the image for each glyph
+    #[arg(short, long, default_value_t = 128)]
+    pub img_size: u32,
     #[cfg(feature = "parallel")]
+    #[arg(short, long)]
     /// Optional number of threads to configure the thread pool for.
     pub number_of_threads: Option<usize>,
-    /// Optional range (inclusively) of unicode values to dump.
+    /// Optional range (inclusively) of unicode values to dump, for example 0x0030..0x00ff
+    #[arg(short, long, verbatim_doc_comment)]
     pub unicode_range: Option<UnicodeRange>,
-}
-
-impl Default for CliArgs {
-    fn default() -> Self {
-        Self {
-            font_file: Default::default(),
-            output_dir: Some("out".to_owned()),
-            color: Some(Color {
-                red: 255,
-                green: 255,
-                blue: 255,
-            }),
-            img_size: Some(128),
-            #[cfg(feature = "parallel")]
-            number_of_threads: None,
-            unicode_range: None,
-        }
-    }
-}
-
-/// Gets the command line arguments
-fn get_cli_args() -> Result<CliArgs, AppError> {
-    let mut args = CliArgs::from_args();
-    // We will need to fill out defaults for what was not supplied
-    let default_args: CliArgs = CliArgs::default();
-    // Check if we have an output directory
-    if args.output_dir.is_none() {
-        debug!("Output directory was not specified, using default.");
-        args.output_dir = default_args.output_dir;
-    }
-    // Check if we need to provide a color
-    if args.color.is_none() {
-        args.color = default_args.color;
-    }
-    if args.img_size.is_none() {
-        args.img_size = default_args.img_size;
-    }
-    Ok(args)
 }
 
 /// Calculates the height and width of a glyph.
@@ -230,7 +219,11 @@ fn convert_to_be_hex_string(unicode: char) -> Result<String, AppError> {
         be_bytes.push((val & 0xFF) as u8);
     }
     // And convert to hex
-    Ok(be_bytes.to_hex())
+    Ok(be_bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(""))
 }
 
 /// Creates an image for a glyph mapped to the specified unicode value
@@ -314,7 +307,7 @@ where
 
 fn main() -> Result<(), AppError> {
     env_logger::init();
-    let arguments = get_cli_args()?;
+    let arguments = CliArgs::parse();
     debug!("Command line arguments: {:#?}", &arguments);
 
     let font_data = std::fs::read(&arguments.font_file)?;
@@ -346,25 +339,19 @@ fn main() -> Result<(), AppError> {
             .collect();
     }
     // Use a black color as output
-    let color_arg = arguments.color.unwrap();
+    let color_arg = &arguments.color;
     let output_color = (color_arg.red, color_arg.green, color_arg.blue);
     // Size of desired image
-    let img_size = arguments.img_size.unwrap();
+    let img_size = arguments.img_size;
     let mut base_dir = PathBuf::new();
-    // If we have an output directory, which we should since we
-    // are setting up the arguments, but still need to check
-    if let Some(output_dir) = arguments.output_dir.as_ref() {
-        // Grab the base name of the font file
-        let base_name = get_base_name(&arguments.font_file)?;
-        // And build up the final output directory using the base
-        // name.
-        base_dir.push(&output_dir);
-        base_dir.push(&base_name);
-        // Create the directory tree
-        fs::create_dir_all(base_dir.as_path())?;
-    } else {
-        return Err(AppError::General("Output directory is not specified"));
-    }
+    // Grab the base name of the font file
+    let base_name = get_base_name(&arguments.font_file)?;
+    // And build up the final output directory using the base
+    // name.
+    base_dir.push(&arguments.output_dir);
+    base_dir.push(&base_name);
+    // Create the directory tree
+    fs::create_dir_all(base_dir.as_path())?;
 
     // If user provided a specific number of threads to use in the thread pool,
     // configure the global rayon thread pool appropriately.
@@ -400,4 +387,85 @@ fn main() -> Result<(), AppError> {
         debug!("Created image: {:?}", image_path);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_str_color_with_short() {
+        let result = Color::from_str(&"#00".to_owned());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AppError::ColorParseError(_) => return (),
+            _ => panic!("Invalid error type returned."),
+        }
+    }
+
+    #[test]
+    fn from_str_color() {
+        let result = Color::from_str(&"#001122".to_owned());
+        assert!(result.is_ok());
+        let color = result.unwrap();
+        assert_eq!(34, color.blue);
+        assert_eq!(17, color.green);
+        assert_eq!(00, color.red);
+    }
+
+    #[test]
+    fn from_str_unicode_range() {
+        let result = UnicodeRange::from_str("0x00..0x67");
+        assert!(result.is_ok());
+        let range = result.unwrap();
+        assert_eq!('\u{0000}', range.start.character);
+        assert_eq!('\u{0067}', range.end.character);
+    }
+
+    #[test]
+    fn from_str_unicode_range_invalid() {
+        let result = UnicodeRange::from_str("0x00");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AppError::InvalidRange() => return (),
+            _ => panic!("Invalid error type returned."),
+        }
+    }
+
+    #[test]
+    fn from_str_unicode_value() {
+        let result = UnicodeValue::from_str("0x0042");
+        assert!(result.is_ok());
+        assert_eq!('\u{0042}', result.unwrap().character);
+    }
+
+    #[test]
+    fn from_str_unicode_value_too_large() {
+        let result = UnicodeValue::from_str("0x00000000");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AppError::OutOfRangeUnicode(_) => return (),
+            _ => panic!("Invalid error type thrown"),
+        }
+    }
+
+    #[test]
+    fn from_str_unicode_invalid_hex() {
+        let result = UnicodeValue::from_str("0xrj");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AppError::HexStringError(_) => return (),
+            _ => panic!("Invalid error type"),
+        }
+    }
+
+    #[test]
+    fn convert_to_be_hex_string_is_valid() {
+        let c: char = '\u{4269}';
+        match convert_to_be_hex_string(c) {
+            Ok(val) if val == "00004269" => return (),
+            Ok(val) => panic!("Expected 00004269, got: {}", val),
+            _ => panic!("Failed to convert to hex string"),
+        }
+    }
 }

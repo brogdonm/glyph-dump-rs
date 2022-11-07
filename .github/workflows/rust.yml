@@ -44,5 +44,7 @@ jobs:
         key: ${{ matrix.os }}-cargo-target-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
     - name: Build
       run: cargo build ${{ matrix.features }}
+    - name: Test 
+      run: cargo test ${{ matrix.features }}
     - name: Clippy
       run: cargo clippy ${{ matrix.features }}
