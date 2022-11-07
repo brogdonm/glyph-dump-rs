@@ -58,9 +58,7 @@ impl FromStr for UnicodeRange {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let pieces = s.split("..").collect::<Vec<_>>();
         if pieces.len() != 2 {
-            return Err(AppError::General(
-                "Failed to parse unicode range, invalid format",
-            ));
+            return Err(AppError::InvalidRange());
         }
         let start = UnicodeValue::from_str(pieces[0])?;
         let end = UnicodeValue::from_str(pieces[1])?;
@@ -86,15 +84,11 @@ impl FromStr for UnicodeValue {
             // or the U+
             .replace("U+", "");
 
+        if the_arg.len() > 6 {
+            return Err(AppError::OutOfRangeUnicode(s.to_string()));
+        }
         // Convert our input string to a hex string and then into a vector of u8 values
-        let the_arg_bytes = hex_string::HexString::from_string(&the_arg)
-            .map_err(|x| {
-                AppError::FormattedMessage(format!(
-                    "Failed to convert base name to str; {:?} (expected to be multiples of 2)",
-                    x
-                ))
-            })?
-            .as_bytes();
+        let the_arg_bytes = hex_string::HexString::from_string(&the_arg)?.as_bytes();
         // Setup a 32-bit array
         let mut arg_u32: [u8; 4] = [0u8; 4];
         // And copy in our slice from the conversion
@@ -229,8 +223,7 @@ fn convert_to_be_hex_string(unicode: char) -> Result<String, AppError> {
         .iter()
         .map(|b| format!("{:02x}", b))
         .collect::<Vec<_>>()
-        .join("")
-    )
+        .join(""))
 }
 
 /// Creates an image for a glyph mapped to the specified unicode value
