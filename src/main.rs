@@ -388,3 +388,84 @@ fn main() -> Result<(), AppError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_str_color_with_short() {
+        let result = Color::from_str(&"#00".to_owned());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AppError::ColorParseError(_) => return (),
+            _ => panic!("Invalid error type returned."),
+        }
+    }
+
+    #[test]
+    fn from_str_color() {
+        let result = Color::from_str(&"#001122".to_owned());
+        assert!(result.is_ok());
+        let color = result.unwrap();
+        assert_eq!(34, color.blue);
+        assert_eq!(17, color.green);
+        assert_eq!(00, color.red);
+    }
+
+    #[test]
+    fn from_str_unicode_range() {
+        let result = UnicodeRange::from_str("0x00..0x67");
+        assert!(result.is_ok());
+        let range = result.unwrap();
+        assert_eq!('\u{0000}', range.start.character);
+        assert_eq!('\u{0067}', range.end.character);
+    }
+
+    #[test]
+    fn from_str_unicode_range_invalid() {
+        let result = UnicodeRange::from_str("0x00");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AppError::InvalidRange() => return (),
+            _ => panic!("Invalid error type returned."),
+        }
+    }
+
+    #[test]
+    fn from_str_unicode_value() {
+        let result = UnicodeValue::from_str("0x0042");
+        assert!(result.is_ok());
+        assert_eq!('\u{0042}', result.unwrap().character);
+    }
+
+    #[test]
+    fn from_str_unicode_value_too_large() {
+        let result = UnicodeValue::from_str("0x00000000");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AppError::OutOfRangeUnicode(_) => return (),
+            _ => panic!("Invalid error type thrown"),
+        }
+    }
+
+    #[test]
+    fn from_str_unicode_invalid_hex() {
+        let result = UnicodeValue::from_str("0xrj");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AppError::HexStringError(_) => return (),
+            _ => panic!("Invalid error type"),
+        }
+    }
+
+    #[test]
+    fn convert_to_be_hex_string_is_valid() {
+        let c: char = '\u{4269}';
+        match convert_to_be_hex_string(c) {
+            Ok(val) if val == "00004269" => return (),
+            Ok(val) => panic!("Expected 00004269, got: {}", val),
+            _ => panic!("Failed to convert to hex string"),
+        }
+    }
+}
