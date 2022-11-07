@@ -26,11 +26,18 @@ struct Color {
 }
 
 impl FromStr for Color {
-    type Err = std::num::ParseIntError;
+    type Err = AppError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Verify the length of the hex color is in the form of #rRgGbB
+        if s.len() != 7 {
+            return Err(AppError::ColorParseError(s.to_string()));
+        }
+        // Parse the red color
         let red = u8::from_str_radix(&s[1..3], 16)?;
+        // Parse the green color
         let green = u8::from_str_radix(&s[3..5], 16)?;
+        // Parse the blue color
         let blue = u8::from_str_radix(&s[5..7], 16)?;
         Ok(Self { red, green, blue })
     }
